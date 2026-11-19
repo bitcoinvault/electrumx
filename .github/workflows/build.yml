@@ -2,34 +2,58 @@ name: "Docker Build & Test"
 
 on:
   pull_request:
-    types:
-      - opened
-      - synchronize
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
 
-      # In this step, this action saves a list of existing images,
-      # the cache is created without them in the post run.
-      # It also restores the cache if it exists.
-      - uses: satackey/action-docker-layer-caching@v0.0.11
-        # Ignore the failure of a step and avoid terminating the job.
-        continue-on-error: true
-
-      - name: Build docker image
+      - name: Build BTCV runtime
         run: docker build -t bitcoin-vault-electrumx-ci .
 
-# Disable tests
-#      - name: pytest
-#        run: docker run --rm -w /source -e LOCAL_USER_ID=`id -u` -v "$(PWD):/source" bitcoin-vault-electrumx-ci pytest --cov=electrumx
+      - name: Reject startup without DAEMON_URL
+        timeout-minutes: 1
+        run: |
+          status=0
+          output=$(docker run --rm --pull=never --network none bitcoin-vault-electrumx-ci 2>&1) || status=$?
+          printf 'Container exit: %s\n%s\n' "$status" "$output"
+          test "$status" -eq 1
+          grep -Fq 'required envvar DAEMON_URL' <<< "$output"
 
-      - name: pycodestyle
-        run: docker run --rm -w /source -e LOCAL_USER_ID=`id -u` -v "$(PWD):/source" bitcoin-vault-electrumx-ci flake8 --exit-zero --max-line-length 100 --filename "./electrumx/**/*.py,./electrumx/*.py"
+      - name: Wallet sync and restart on the installed runtime
+        run: |
+          docker run --rm --pull=never --network none \
+            --mount "type=bind,source=${PWD}/tests/integration,target=/smoke,readonly" \
+            --entrypoint python3 bitcoin-vault-electrumx-ci -B /smoke/test_runtime_wallet.py
+
+      - name: TLS, WebSocket and local RPC on the installed runtime
+        run: |
+          docker run --rm --pull=never --network none \
+            --mount "type=bind,source=${PWD}/tests/integration,target=/smoke,readonly" \
+            --entrypoint python3 bitcoin-vault-electrumx-ci -B /smoke/test_runtime_transports.py
+
+      - name: Build unit test layer
+        run: docker build -f docker/electrumx.Dockerfile -t bitcoin-vault-electrumx-unit .
+
+      - name: Core unit tests
+        run: |
+          unit_tests() {
+            # test_MAX_SESSIONS expects a file descriptor limit below one million.
+            docker run --rm --pull=never --network none --ulimit nofile=65536:65536 \
+              bitcoin-vault-electrumx-unit python -m pytest -q --asyncio-mode=auto \
+              -o asyncio_default_fixture_loop_scope=function "$@"
+          }
+          # Library and server env tests each mutate the process environment.
+          unit_tests tests/test_vault_transactions.py \
+            tests/lib/test_hash.py tests/lib/test_merkle.py tests/lib/test_tx.py \
+            tests/lib/test_util.py tests/lib/test_coins.py tests/lib/test_env_base.py
+          # Only LevelDB is part of this image, not the optional RocksDB backend.
+          unit_tests tests/server -k 'not test_storage or LevelDB'

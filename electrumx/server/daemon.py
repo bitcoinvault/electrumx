@@ -103,8 +103,7 @@ class Daemon(object):
     async def _send_data(self, data):
         async with self.workqueue_semaphore:
             async with self.session.post(self.current_url(), data=data) as resp:
-                kind = resp.headers.get('Content-Type', None)
-                if kind == 'application/json':
+                if resp.content_type == 'application/json':
                     return await resp.json()
                 text = await resp.text()
                 text = text.strip() or resp.reason
@@ -464,7 +463,7 @@ class DecredDaemon(Daemon):
 
     def connector(self):
         # FIXME allow self signed certificates
-        return aiohttp.TCPConnector(verify_ssl=False)
+        return aiohttp.TCPConnector(ssl=False)
 
 
 class PreLegacyRPCDaemon(LegacyRPCDaemon):

@@ -14,16 +14,14 @@ services:
       io.rancher.container.pull_image: always
 
   electrumx:
-    build:
-      context: .
-      dockerfile: docker/electrumx.Dockerfile
+    build: .
     ports:
       - "50001:50001"
       - "50002:50002"
       - "50004:50004"
       - "10000:10000"
     volumes:
-      - ./:/electrumx/
+      - ./data:/electrumx/data
     environment:
       HOME: /electrumx/data
       DB_DIRECTORY: /electrumx/data
@@ -34,11 +32,3 @@ services:
       SSL_CERTFILE: /electrumx/data/electrumx.crt
       SSL_KEYFILE: /electrumx/data/electrumx.key
       USE_MAX_VERSION: 0
-    command:
-      - sh
-      - -c
-      - |
-        cd /electrumx/
-        mkdir data
-        python setup.py install
-        python electrumx_server
