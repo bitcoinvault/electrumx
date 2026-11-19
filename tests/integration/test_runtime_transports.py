@@ -130,7 +130,8 @@ class RuntimeTransports(unittest.TestCase):
         self.assertEqual(self.rpc(exchange, 3, "blockchain.scripthash.get_history", fixture.SCRIPTHASH),
                          [{"height": 1, "tx_hash": fixture.TXID, "tx_type": "NONVAULT"}])
         self.assertEqual(self.rpc(exchange, 4, "blockchain.scripthash.get_balance", fixture.SCRIPTHASH),
-                         {"confirmed": fixture.VALUE, "unconfirmed": 0})
+                         {"confirmed": fixture.VALUE, "unconfirmed": 0,
+                          "alert_incoming": 0, "alert_outgoing": 0})
 
     def test_tls(self):
         with socket.create_connection((HOST, self.ports["ssl"]), TIMEOUT) as raw:
