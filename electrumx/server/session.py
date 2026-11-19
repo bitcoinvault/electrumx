@@ -24,9 +24,10 @@ from ipaddress import IPv4Address, IPv6Address
 import attr
 from aiorpcx import (
     RPCSession, JSONRPCAutoDetect, JSONRPCConnection, serve_rs, serve_ws,
-    TaskGroup, handler_invocation, RPCError, Request, sleep, Event, ReplyAndDisconnect
+    TaskGroup, TaskTimeout, handler_invocation, RPCError, Request, sleep, Event, ReplyAndDisconnect
 )
 import pylru
+from websockets.exceptions import ConnectionClosed
 
 import electrumx
 from electrumx.lib.merkle import MerkleCache
@@ -976,13 +977,23 @@ class ElectrumX(SessionBase):
         self.mempool_statuses.pop(hashX, None)
         return self.hashX_subs.pop(hashX, None)
 
+    async def _send_subscription(self, method, args):
+        try:
+            await self.send_notification(method, args)
+        except (TaskTimeout, ConnectionClosed) as exc:
+            # The WebSocket closed, or aiorpcX aborted the timed-out write.
+            self.logger.debug('subscription send stopped: %s (%s)', method, exc)
+            return False
+        return True
+
     async def notify(self, touched, height_changed):
         '''Notify the client about changes to touched addresses (from mempool
         updates or new blocks) and height.
         '''
         if height_changed and self.subscribe_headers:
             args = (await self.subscribe_headers_result(), )
-            await self.send_notification('blockchain.headers.subscribe', args)
+            if not await self._send_subscription('blockchain.headers.subscribe', args):
+                return
 
         touched = touched.intersection(self.hashX_subs)
         if touched or (height_changed and self.mempool_statuses):
@@ -1006,7 +1017,8 @@ class ElectrumX(SessionBase):
 
             method = 'blockchain.scripthash.subscribe'
             for alias, status in changed.items():
-                await self.send_notification(method, (alias, status))
+                if not await self._send_subscription(method, (alias, status)):
+                    return
 
             if changed:
                 es = '' if len(changed) == 1 else 'es'
