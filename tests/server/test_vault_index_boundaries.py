@@ -1,5 +1,6 @@
+from struct import pack
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -116,3 +117,64 @@ async def test_flush_validates_before_consuming_buffers(open_index, bad_hashes, 
         data.block_tx_types[:] = types
     await bp.flush(True)
     assert bp.db.fs_tx_hash(1) == (item[1], 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('alert_count', [1, 2])
+async def test_recovery_reorg_restores_each_pending_outpoint(open_index, monkeypatch, alert_count):
+    bp = await open_index()
+    funding = [tx(10 + i) for i in range(alert_count + 1)]
+    for item in funding:
+        advance(bp, item)
+
+    alerts, outpoints, expected = [], [], []
+    for i in range(alert_count):
+        alert, tx_hash = tx(20 + i, VaultTxType.ALERT_PENDING, funding[i][1])
+        outputs = []
+        for vout, amount in enumerate((19 + i, 29 - i)):
+            script = b'\x76\xa9\x14' + bytes([1 + 2 * i + vout]) * 20 + b'\x88\xac'
+            outputs.append(TxOutput(amount, script))
+            outpoints.append((tx_hash, vout))
+            expected.append((bp.coin.hashX_from_script(script), amount))
+        alerts.append((alert._replace(outputs=outputs), tx_hash))
+
+    advance(bp, tx(30), alerts)
+    await bp.flush(True)
+    old_tip = bp.tip
+    before = await bp.db.lookup_utxos(outpoints)
+    assert before == expected
+    pending = [await bp.db.all_utxos(hashX) for hashX, _ in before]
+    for (tx_hash, vout), (_, amount), (utxo,) in zip(outpoints, before, pending):
+        assert (utxo.tx_hash, utxo.tx_pos, utxo.value, utxo.spend_tx_num) == (
+            tx_hash, vout, amount, -1)
+
+    recoveries = [tx(40 + i, VaultTxType.RECOVERY, funding[i][1]) for i in range(alert_count)]
+    # A new alert also contributes an input record before the recovered-output suffix.
+    new_alert = tx(50, VaultTxType.ALERT_PENDING, funding[-1][1])
+    header = bytes(4) + old_tip + bytes(44)
+    block = BitcoinVaultBlock(header, header, [tx(31), *recoveries], [new_alert])
+    bp.advance_blocks([block])
+    await bp.flush(True)
+    bp = await open_index()
+    assert await bp.db.lookup_utxos(outpoints) == [None] * len(outpoints)
+
+    # Pin the legacy bytes from disk: each alert's outputs have no vout field.
+    records = [hashX + pack('<IQi', utxo.tx_num, amount, -1)
+               for (hashX, amount), (utxo,) in zip(before, pending)]
+    groups = [records[j] + records[j + 1] for j in range(0, len(records), 2)]
+    undo = bp.db.read_undo_info(bp.height)
+    suffix = undo[(len(recoveries) + 1) * len(records[0]):]
+    assert suffix in (b''.join(groups), b''.join(reversed(groups)))
+
+    # Supply the already decoded fixture block; backup, flush and reopen use LevelDB.
+    decoder = Mock(return_value=block)
+    monkeypatch.setattr(bp.coin, 'block', decoder)
+    bp.daemon.height = AsyncMock(return_value=bp.height)
+    old_height = bp.height - 1
+    await bp.reorg_chain(1)
+    decoder.assert_called_once_with(block.raw, old_height + 1)
+    assert await bp.db.lookup_utxos(outpoints) == before
+    bp = await open_index()
+    assert (bp.db.db_height, bp.db.db_tip) == (old_height, old_tip)
+    assert await bp.db.lookup_utxos(outpoints) == before
+    assert [await bp.db.all_utxos(hashX) for hashX, _ in before] == pending
