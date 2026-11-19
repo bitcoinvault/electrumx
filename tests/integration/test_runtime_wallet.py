@@ -3,7 +3,7 @@
 docker run --rm --pull=never --network none --mount "type=bind,source=${PWD}/tests/integration,target=/smoke,readonly" --entrypoint python3 btcv-electrumx:runtime-local -B /smoke/test_runtime_wallet.py
 
 Only the Core HTTP RPC is a stub. ElectrumX indexes serialized blocks in a
-fresh LevelDB and serves both wallet reads over TCP, before and after restart.
+fresh LevelDB and serves wallet reads over TCP, before and after restart.
 This tests indexing, not Core consensus, coinbase maturity or spendability.
 """
 
@@ -63,6 +63,25 @@ def regtest_chain():
     return {double_sha(raw[:80])[::-1].hex(): raw.hex() for raw in (first, second)}
 
 
+def pending_alert_chain():
+    # Indexing only: no signatures, consensus checks, or spendable keys.
+    first = bytes.fromhex(regtest_chain()[GENESIS])
+    redeem = (bytes.fromhex("6351675268") + b"\x21\x02" + b"\x11" * 32
+              + b"\x21\x03" + b"\x22" * 32 + b"\x52\xae")
+    redeem_hash = hashlib.new("ripemd160", hashlib.sha256(redeem).digest()).digest()
+    funding = coinbase(b"\x01\x01", VALUE, b"\xa9\x14" + redeem_hash + b"\x87")
+    second = block(double_sha(first[:80]), funding, 1296688603, 7) + b"\x00"
+    script_sig = b"\x00\x01\x01\x4b" + redeem
+    destination = bytes.fromhex("76a914" + "11" * 20 + "88ac")
+    alert = (bytes.fromhex("0100000001") + double_sha(funding) + bytes(4)
+             + bytes([len(script_sig)]) + script_sig + b"\xff" * 4 + b"\x01"
+             + struct.pack("<Q", VALUE - 1) + bytes([len(destination)]) + destination + bytes(4))
+    reward = coinbase(b"\x01\x02", 0, b"\x6a")
+    third = block(double_sha(second[:80]), reward, 1296688604, 8) + b"\x01" + alert
+    blocks = {double_sha(raw[:80])[::-1].hex(): raw.hex() for raw in (first, second, third)}
+    return blocks, double_sha(alert)[::-1].hex()
+
+
 class CoreRPC(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -72,9 +91,10 @@ class CoreRPC(BaseHTTPRequestHandler):
         s = self.server
         error = result = None
         if method == "getblockcount" and not params:
-            result = 1
-        elif method == "getblockhash" and params in ([0], [1]):
-            result = (GENESIS, TIP)[params[0]]
+            result = len(s.blocks) - 1
+        elif (method == "getblockhash" and len(params) == 1 and isinstance(params[0], int)
+              and 0 <= params[0] < len(s.blocks)):
+            result = list(s.blocks)[params[0]]
         elif (method == "getblock" and len(params) == 2
               and params[1] is False and params[0] in s.blocks):
             s.fetched.append(params[0])
@@ -98,10 +118,11 @@ class CoreRPC(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def core_stub():
+def core_stub(blocks=None):
     """Yield the running loopback Core fixture (use core.server_port)."""
     with HTTPServer((LOOPBACK, 0), CoreRPC) as core:
-        core.blocks, core.fetched, core.unexpected = regtest_chain(), [], []
+        core.blocks = regtest_chain() if blocks is None else blocks
+        core.fetched, core.unexpected = [], []
         thread = threading.Thread(target=core.serve_forever, daemon=True)
         thread.start()
         try:
@@ -126,7 +147,7 @@ def wait_for_wallet(proc, port):
 @unittest.skipUnless(__name__ == "__main__" or os.getenv("ELECTRUMX_WALLET_SMOKE") == "1",
                      "run explicitly inside the candidate container")
 class RuntimeWallet(unittest.TestCase):
-    def check_wallet(self, conn, header):
+    def wallet_rpc(self, conn):
         request_id = 0
 
         def rpc(method, *params):
@@ -140,6 +161,10 @@ class RuntimeWallet(unittest.TestCase):
             self.assertIsNone(response.get("error"), (method, response))
             return response["result"]
 
+        return rpc
+
+    def check_wallet(self, conn, header):
+        rpc = self.wallet_rpc(conn)
         server, protocol = rpc("server.version", "runtime-smoke", "2.0")
         self.assertRegex(server, r"^ElectrumX \S+")
         self.assertEqual(protocol, "2.0")
@@ -149,7 +174,7 @@ class RuntimeWallet(unittest.TestCase):
         self.assertEqual(rpc("blockchain.scripthash.get_balance", SCRIPTHASH),
                          {"confirmed": VALUE, "unconfirmed": 0})
 
-    def boot_and_check(self, db, core):
+    def boot_and_check(self, db, core, checks=None):
         # The container has no published ports. Pick an unused local wallet port.
         with socket.socket() as probe:
             probe.bind((LOOPBACK, 0))
@@ -162,8 +187,11 @@ class RuntimeWallet(unittest.TestCase):
             proc = subprocess.Popen(["electrumx_server"], cwd=str(db), env=env,
                                     stdout=log, stderr=subprocess.STDOUT)
             try:
-                with wait_for_wallet(proc, port) as sock, sock.makefile("rwb") as conn:
-                    self.check_wallet(conn, core.blocks[TIP][:160])
+                if checks is None:
+                    checks = [lambda conn: self.check_wallet(conn, core.blocks[TIP][:160])]
+                for check in checks:
+                    with wait_for_wallet(proc, port) as sock, sock.makefile("rwb") as conn:
+                        check(conn)
                 self.assertIsNone(proc.poll(), "ElectrumX exited before SIGTERM")
                 proc.terminate()
                 self.assertEqual(proc.wait(timeout=15), 0)
@@ -193,6 +221,36 @@ class RuntimeWallet(unittest.TestCase):
             core.fetched.clear()
             self.boot_and_check(db, core)
             self.assertEqual(core.fetched, [], "reopened DB should not refetch blocks")
+            self.assertEqual(core.unexpected, [])
+
+    def test_pending_alert_wallet_views(self):
+        blocks, alert_txid = pending_alert_chain()
+
+        def check(conn, protocol):
+            rpc = self.wallet_rpc(conn)
+            self.assertEqual(rpc("server.version", "vault-read-smoke", protocol)[1], protocol)
+            history = rpc("blockchain.scripthash.get_history", SCRIPTHASH)
+            unspent = rpc("blockchain.scripthash.listunspent", SCRIPTHASH)
+            status = rpc("blockchain.scripthash.subscribe", SCRIPTHASH)
+            if protocol == "2.0":
+                self.assertEqual(history, [{"height": 2, "tx_hash": alert_txid,
+                                            "tx_type": "ALERT_PENDING"}])
+                self.assertEqual(unspent, [{"height": 2, "tx_hash": alert_txid, "tx_pos": 0,
+                                            "value": VALUE - 1, "spend_tx_num": -1}])
+                preimage = f"{alert_txid}:2:ALERT_PENDING:".encode()
+                self.assertEqual(status, hashlib.sha256(preimage).hexdigest())
+            else:
+                self.assertEqual(history, [])
+                self.assertEqual(unspent, [])
+                self.assertIsNone(status)
+
+        with tempfile.TemporaryDirectory() as tmp, core_stub(blocks) as core:
+            checks = [lambda conn: check(conn, "1.4"), lambda conn: check(conn, "2.0")]
+            self.boot_and_check(Path(tmp), core, checks)
+            self.assertEqual(core.fetched, list(blocks))
+            core.fetched.clear()
+            self.boot_and_check(Path(tmp), core, checks)
+            self.assertEqual(core.fetched, [])
             self.assertEqual(core.unexpected, [])
 
 
