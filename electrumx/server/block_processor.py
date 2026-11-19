@@ -1019,7 +1019,6 @@ class BitcoinVaultBlockProcessor(BlockProcessor):
         if undo_info is None:
             raise ChainError('no undo information found for height {:,d}'
                              .format(self.height))
-        n = len(undo_info)
 
         # Use local vars for speed in the loops
         s_pack = pack
@@ -1042,20 +1041,23 @@ class BitcoinVaultBlockProcessor(BlockProcessor):
                     recovered_atx_nums.add(spend_tx_num)
                 m += undo_entry_len
 
-        # undo recovered alerts
-        for num in recovered_atx_nums:
-            recovered_atx_hash = self._recovery_tx_hash(num)
-
-            m = n - undo_entry_len
-            undo_item = undo_info[m:m + undo_entry_len]
-            vout_index = 0
-            while n >= undo_entry_len and undo_info[n-undo_entry_len:n][-16:-12] == undo_item[-16:-12]:
-                n -= undo_entry_len
-                undo_item = undo_info[n:n + undo_entry_len]
-                put_utxo(recovered_atx_hash + s_pack('<H', vout_index),
-                         undo_item)
-                touched.add(undo_item[:-16])
-                vout_index += 1
+        # Inputs form the undo stack; the suffix stores each alert's outputs in vout order.
+        n = m + sum(len(atx.inputs) for atx, _ in atxs) * undo_entry_len
+        if n > len(undo_info) or len(undo_info) % undo_entry_len:
+            raise ChainError(f'incomplete undo information at height {self.height}')
+        last_num = None
+        for offset in range(n, len(undo_info), undo_entry_len):
+            undo_item = undo_info[offset:offset + undo_entry_len]
+            num, = unpack('<I', undo_item[-16:-12])
+            if num != last_num:
+                if num not in recovered_atx_nums:
+                    raise ChainError(f'unexpected recovered alert {num} at height {self.height}')
+                recovered_atx_hash = self._recovery_tx_hash(num)
+                last_num = num
+                vout_index = 0
+            put_utxo(recovered_atx_hash + s_pack('<H', vout_index), undo_item)
+            touched.add(undo_item[:-16])
+            vout_index += 1
 
         # undo alerts
         for atx, atx_hash in reversed(atxs):
