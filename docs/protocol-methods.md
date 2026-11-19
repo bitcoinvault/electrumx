@@ -255,7 +255,9 @@ The fee in whole coin units as a floating point number.
 blockchain.scripthash.get_balance
 =================================
 
-Return the confirmed and unconfirmed balances of a script hash.
+Return the balance of a script hash, or the field-wise sum for a comma-separated
+list of script hashes. Each occurrence counts, including duplicates. A JSON-RPC
+batch of separate calls returns separate balances, not an aggregate.
 
 **Signature**
 ```
@@ -272,17 +274,22 @@ The script hash as a hexadecimal string.
 
 **Result**
 
-A dictionary with keys `confirmed`, `unconfirmed`, `alert_incoming`,
-`alert_outgoing`.  The value of each is the appropriate balance in
-coin units as a string.
+Amounts are integers in satoshis. `confirmed` excludes outputs marked as
+pending incoming or outgoing alerts. In protocol 1.4 the only other field is
+`unconfirmed`: the net mempool delta plus pending incoming amounts already
+in the index. Protocol 2.0 reports the net mempool delta in `unconfirmed`
+and separately returns `alert_incoming` and `alert_outgoing` for indexed
+and unmined alerts, including when zero. An unmined alert contributes to the
+net mempool delta as well as the relevant alert field; do not add the fields
+together to calculate a spendable balance.
 
 **Result Example**
 ```
 {
-    "confirmed": "1.03873966",
-    "unconfirmed": "0.236844",
-    "alert_incoming": "278.236844",
-    "alert_outgoing": "300.236844"
+    "confirmed": 103873966,
+    "unconfirmed": 23684400,
+    "alert_incoming": 27823684400,
+    "alert_outgoing": 30023684400
 }
 ```
 

@@ -28,6 +28,7 @@ GENESIS = "01cead69f2b51e214e1c2cd50e3744428cae526db87b2ff8f32489ff801d0f1d"
 TIP = "0599fae4c64670e17b4e94f4f17ef6f654d3300898b6e272e5b567e5a04aca71"
 TXID = "546889787a4a2e0085400483da4bd09bdd88ed905bf2257a5934d0d826fda7fd"
 SCRIPTHASH = "0e86768a14a61e71306f240f5b8bb92ced2f1abfb246b82d9356549834c2f6e2"
+VAULT_SCRIPTHASH = "b9bb266fbc2b439224bd9824244920ed7d8196bdc8f9600ec3f92d561aa59fa0"
 VALUE = 123456789
 
 
@@ -163,16 +164,19 @@ class RuntimeWallet(unittest.TestCase):
 
         return rpc
 
-    def check_wallet(self, conn, header):
+    def check_wallet(self, conn, header, version):
         rpc = self.wallet_rpc(conn)
-        server, protocol = rpc("server.version", "runtime-smoke", "2.0")
+        server, protocol = rpc("server.version", "runtime-smoke", version)
         self.assertRegex(server, r"^ElectrumX \S+")
-        self.assertEqual(protocol, "2.0")
+        self.assertEqual(protocol, version)
         self.assertEqual(rpc("blockchain.headers.subscribe"), {"height": 1, "hex": header})
-        self.assertEqual(rpc("blockchain.scripthash.get_history", SCRIPTHASH),
-                         [{"height": 1, "tx_hash": TXID, "tx_type": "NONVAULT"}])
-        self.assertEqual(rpc("blockchain.scripthash.get_balance", SCRIPTHASH),
-                         {"confirmed": VALUE, "unconfirmed": 0})
+        row = {"height": 1, "tx_hash": TXID}
+        balance = {"confirmed": VALUE, "unconfirmed": 0}
+        if version == "2.0":
+            row["tx_type"] = "NONVAULT"
+            balance.update(alert_incoming=0, alert_outgoing=0)
+        self.assertEqual(rpc("blockchain.scripthash.get_history", SCRIPTHASH), [row])
+        self.assertEqual(rpc("blockchain.scripthash.get_balance", SCRIPTHASH), balance)
 
     def boot_and_check(self, db, core, checks=None):
         # The container has no published ports. Pick an unused local wallet port.
@@ -188,7 +192,8 @@ class RuntimeWallet(unittest.TestCase):
                                     stdout=log, stderr=subprocess.STDOUT)
             try:
                 if checks is None:
-                    checks = [lambda conn: self.check_wallet(conn, core.blocks[TIP][:160])]
+                    checks = [lambda conn, v=v: self.check_wallet(conn, core.blocks[TIP][:160], v)
+                              for v in ("1.4", "2.0")]
                 for check in checks:
                     with wait_for_wallet(proc, port) as sock, sock.makefile("rwb") as conn:
                         check(conn)
@@ -239,10 +244,30 @@ class RuntimeWallet(unittest.TestCase):
                                             "value": VALUE - 1, "spend_tx_num": -1}])
                 preimage = f"{alert_txid}:2:ALERT_PENDING:".encode()
                 self.assertEqual(status, hashlib.sha256(preimage).hexdigest())
+                incoming = {"confirmed": 0, "unconfirmed": 0, "alert_incoming": VALUE - 1,
+                            "alert_outgoing": 0}
+                outgoing = {"confirmed": 0, "unconfirmed": 0, "alert_incoming": 0,
+                            "alert_outgoing": VALUE}
             else:
                 self.assertEqual(history, [])
                 self.assertEqual(unspent, [])
                 self.assertIsNone(status)
+                incoming = {"confirmed": 0, "unconfirmed": VALUE - 1}
+                outgoing = {"confirmed": 0, "unconfirmed": 0}
+
+            method = "blockchain.scripthash.get_balance"
+            self.assertEqual(rpc(method, SCRIPTHASH), incoming)
+            self.assertEqual(rpc(method, VAULT_SCRIPTHASH), outgoing)
+            self.assertEqual(rpc(method, SCRIPTHASH + "," + VAULT_SCRIPTHASH),
+                             {k: incoming[k] + outgoing[k] for k in incoming})
+
+            batch = [{"jsonrpc": "2.0", "id": n, "method": method, "params": [h]}
+                     for n, h in ((10, SCRIPTHASH), (11, VAULT_SCRIPTHASH))]
+            conn.write(json.dumps(batch).encode() + b"\n")
+            conn.flush()
+            replies = json.loads(conn.readline())
+            self.assertCountEqual([r["id"] for r in replies], [10, 11])
+            self.assertEqual({r["id"]: r["result"] for r in replies}, {10: incoming, 11: outgoing})
 
         with tempfile.TemporaryDirectory() as tmp, core_stub(blocks) as core:
             checks = [lambda conn: check(conn, "1.4"), lambda conn: check(conn, "2.0")]

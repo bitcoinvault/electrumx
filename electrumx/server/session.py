@@ -1124,17 +1124,16 @@ class ElectrumX(SessionBase):
         return await self.scripthash_get_balances(scripthash)
 
     async def scripthash_get_balances(self, scripthashs):
-        '''Return the confirmed and unconfirmed balance of a scripthashs.'''
-        confirmed = 0
-        unconfirmed = 0
+        '''Sum the negotiated balance fields for each requested script hash.'''
+        if not isinstance(scripthashs, str) or ',' not in scripthashs:
+            return await self.get_balance(scripthash_to_hashX(scripthashs))
+
+        totals = defaultdict(int)
         for scripthash in scripthashs.split(','):
-            hashX = scripthash_to_hashX(scripthash)
-            utxos = await self.db.all_utxos(hashX)
-            confirmed += sum(utxo.value for utxo in utxos)
-            tmp = await self.mempool.balance_delta(hashX)
-            unconfirmed += tmp[0] # value, in, out
-            self.bump_cost(1.0 + len(utxos) / 50)
-        return {'confirmed': confirmed, 'unconfirmed': unconfirmed}
+            balance = await self.get_balance(scripthash_to_hashX(scripthash))
+            for field, value in balance.items():
+                totals[field] += value
+        return dict(totals)
 
     async def unconfirmed_history(self, hashX):
         # Note unconfirmed history is unordered in electrum-server
@@ -1823,8 +1822,9 @@ class BitcoinVaultElectrumX(ElectrumX):
         self.bump_cost(1.0 + len(utxos) / 50)
 
         if not self._is_alerts_compatible_protocol():
+            # The net mempool delta already contains incoming unmined alerts.
             return {'confirmed': confirmed,
-                    'unconfirmed': unconfirmed + alert_incoming + alert_incoming_delta}
+                    'unconfirmed': unconfirmed + alert_incoming}
         else:
             return {'confirmed': confirmed, 'unconfirmed': unconfirmed,
                     'alert_incoming': alert_incoming + alert_incoming_delta,
