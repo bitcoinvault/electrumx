@@ -833,7 +833,6 @@ class BitcoinVaultBlockProcessor(BlockProcessor):
         # helper counter, atx are counted also for tx_count
         self.atx_count = 0
         self.ratx_count = 0
-        self.flush_height = 0
 
     def estimate_txs_remaining(self):
         # Try to estimate how many txs there are to go
@@ -847,7 +846,6 @@ class BitcoinVaultBlockProcessor(BlockProcessor):
 
     def flush_data(self):
         assert self.state_lock.locked()
-        self.flush_height = self.height
         return BitcoinVaultFlushData(self.height, self.tx_count, self.headers,
                          self.tx_hashes, self.undo_infos, self.utxo_cache,
                          self.db_deletes, self.tip, self.tx_types)
@@ -957,9 +955,7 @@ class BitcoinVaultBlockProcessor(BlockProcessor):
         # Handle recovered ALERTs
         recovered_atx = []
         for num in recovered_atx_nums:
-            recovered_atx_hash, recovered_atx_height = self.db.fs_tx_hash(num)
-            if recovered_atx_hash is None:
-                recovered_atx_hash = self.get_tx_hash_from_cache(num, recovered_atx_height)
+            recovered_atx_hash = self._recovery_tx_hash(num)
             recovered_atx.append(recovered_atx_hash)
 
             append_hashX = recovered_atx_hashXs[num].append
@@ -1048,9 +1044,7 @@ class BitcoinVaultBlockProcessor(BlockProcessor):
 
         # undo recovered alerts
         for num in recovered_atx_nums:
-            recovered_atx_hash, recovered_atx_height = self.db.fs_tx_hash(num)
-            if recovered_atx_hash is None:
-                recovered_atx_hash = self.get_tx_hash_from_cache(num, recovered_atx_height)
+            recovered_atx_hash = self._recovery_tx_hash(num)
 
             m = n - undo_entry_len
             undo_item = undo_info[m:m + undo_entry_len]
@@ -1113,21 +1107,17 @@ class BitcoinVaultBlockProcessor(BlockProcessor):
         self.atx_count = 0
         self.ratx_count = 0
 
-    def get_tx_hash_from_cache(self, tx_num, tx_height):
-
-        height_tx_count = self.db.tx_counts[tx_height - 1]
-        index = (tx_num - height_tx_count) * 32
-
-        print("--- get_tx_hash_from_cache ---")
-        print(f'tx_num {tx_num}')
-        print(f'height_tx_count {height_tx_count}')
-        print(f'self.flush_height {self.flush_height}')
-        print(f'tx_height {tx_height}')
-        print(f'len(self.tx_hashes) {len(self.tx_hashes)}')
-
-        assert tx_height-self.flush_height > 0
-        tx_hash = self.tx_hashes[tx_height-self.flush_height][index:index + 32]
-
-
-        print(f'tx_hash.hex() {tx_hash.hex()}')
+    def _recovery_tx_hash(self, tx_num):
+        tx_hash, height = self.db.fs_tx_hash(tx_num)
+        if tx_hash is None:
+            # A filesystem-only flush can precede the public UTXO commit.
+            if height <= self.db.fs_height:
+                tx_hash = self.db.hashes_file.read(tx_num * 32, 32)
+            else:
+                block = self.tx_hashes[height - self.db.fs_height - 1]
+                first_tx = self.db.tx_counts[height - 1] if height else 0
+                offset = (tx_num - first_tx) * 32
+                tx_hash = block[offset:offset + 32]
+        if len(tx_hash) != 32:
+            raise ChainError(f'incomplete recovery hash for transaction {tx_num} at height {height}')
         return tx_hash

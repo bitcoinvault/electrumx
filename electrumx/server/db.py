@@ -771,21 +771,11 @@ class BitcoinVaultDB(DB):
         assert len(self.ratx_counts) == flush_data.height + 1
 
         hashes = b''.join(flush_data.block_tx_hashes)
-        print(f'len(hashes) : {len(hashes)}')
-        flush_data.block_tx_hashes.clear()
-        assert len(hashes) % 32 == 0
-
-        # TODO: We need to know why there is +1, and why it is working
-
-        print(f'flush_data.tx_count + 1 : {flush_data.tx_count + 1}')
-        print(f'prior_tx_count : {prior_tx_count}')
-        assert not len(hashes) // 32 == flush_data.tx_count + 1 - prior_tx_count
-
         types = b''.join(flush_data.block_tx_types)
-        flush_data.block_tx_types.clear()
-        print(f'len(types)  : {len(types) }')
-        print(f'flush_data.tx_count - prior_tx_count : {flush_data.tx_count - prior_tx_count}')
-        assert len(types) == flush_data.tx_count - prior_tx_count
+        count = flush_data.tx_count - prior_tx_count
+        if len(hashes) != count * 32 or len(types) != count:
+            raise self.DBError(f'expected {count} transaction hashes and types, '
+                               f'got {len(hashes)} hash bytes and {len(types)} types')
 
         # Write the headers, tx counts, and tx hashes
         start_time = time.time()
@@ -793,7 +783,6 @@ class BitcoinVaultDB(DB):
         offset = self.header_offset(height_start)
         self.headers_file.write(offset, b''.join(flush_data.headers))
         self.fs_update_header_offsets(offset, height_start, flush_data.headers)
-        flush_data.headers.clear()
 
         offset = height_start * self.tx_counts.itemsize
         self.tx_counts_file.write(offset,
@@ -813,6 +802,9 @@ class BitcoinVaultDB(DB):
         offset = prior_tx_count
         self.tx_types_file.write(offset, types)
 
+        flush_data.headers.clear()
+        flush_data.block_tx_hashes.clear()
+        flush_data.block_tx_types.clear()
         self.fs_height = flush_data.height
         self.fs_tx_count = flush_data.tx_count
 
