@@ -20,7 +20,8 @@ Neil Booth wrote the vast majority of the code; see [Authors](docs/authors.md).
 
 Bitcoin Vault development team adjusted the code to BTCV coin.
 
-Python version at least 3.6 is required.
+Python 3.12 or newer is required. The BTCV container targets CPython 3.12
+and LevelDB on Linux amd64; see [runtime validation](docs/btcv-runtime.md).
 
 The code is released under the [MIT Licence](https://github.com/bitcoinvault/electrumx/LICENCE)
 

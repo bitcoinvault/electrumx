@@ -17,8 +17,6 @@ import time
 from contextlib import suppress
 from functools import partial
 
-from aiorpcx import spawn
-
 from electrumx.lib.util import class_logger
 
 
@@ -29,13 +27,13 @@ class ServerBase:
 
     - set PYTHON_MIN_VERSION and SUPPRESS_MESSAGE_REGEX as appropriate
     - implement the serve() coroutine, called from the run() method.
-      Upon return the event loop runs until the shutdown signal is received.
+      The server stops when serve() finishes or requests shutdown.
     '''
     SUPPRESS_MESSAGE_REGEX = re.compile('SSL handshake|Fatal read error on|'
                                         'SSL error in data received|'
                                         'socket.send() raised exception')
     SUPPRESS_TASK_REGEX = re.compile('accept_connection2')
-    PYTHON_MIN_VERSION = (3, 6)
+    PYTHON_MIN_VERSION = (3, 12)
 
     def __init__(self, env):
         '''Save the environment, perform basic sanity checks, and set the
@@ -82,7 +80,7 @@ class ServerBase:
             return
         loop.default_exception_handler(context)
 
-    async def _main(self, loop):
+    async def _main(self):
         '''Run the server application:
 
         - record start time
@@ -94,6 +92,8 @@ class ServerBase:
             shutdown_event.set()
             self.logger.warning(f'received {signame} signal, initiating shutdown')
 
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
         self.start_time = time.time()
         if platform.system() != 'Windows':
             # No signals on Windows
@@ -102,8 +102,8 @@ class ServerBase:
                                         partial(on_signal, signame))
         loop.set_exception_handler(self.on_exception)
 
-        shutdown_event = asyncio.Event()
-        server_task = await spawn(self.serve(shutdown_event))
+        server_task = asyncio.create_task(self.serve(shutdown_event))
+        server_task.add_done_callback(lambda _: shutdown_event.set())
 
         # Wait for shutdown, log on receipt of the event
         try:
@@ -114,14 +114,10 @@ class ServerBase:
             self.logger.info('shutting down')
 
             server_task.cancel()
-            with suppress(Exception):
+            with suppress(asyncio.CancelledError):
                 await server_task
             self.logger.info('shutdown complete')
 
     def run(self):
         '''Start the event loop.'''
-        loop = asyncio.get_event_loop()
-        try:
-            loop.run_until_complete(self._main(loop))
-        finally:
-            loop.run_until_complete(loop.shutdown_asyncgens())
+        asyncio.run(self._main())

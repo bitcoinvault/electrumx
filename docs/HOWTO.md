@@ -12,10 +12,10 @@ small - pull requests are welcome.
 ================ ==================================================
 Package          Notes
 ================ ==================================================
-Python3          ElectrumX uses asyncio.  Python version >= 3.6 is
+Python3          ElectrumX uses asyncio.  Python version >= 3.12 is
                  required.
 aiohttp          Python library for asynchronous HTTP.  Version >=
-                 2.0 required.
+                 3.14.5 and < 4 required.
 pylru            Python LRU cache package.
 
 DB Engine        A database engine package is required; two are
@@ -59,7 +59,9 @@ recommend having at least 30-40GB of free space before starting.
 Database Engine
 ===============
 
-You can choose from LevelDB and RocksDB to store transaction
+The BTCV container ships LevelDB only. Do not use it to open a RocksDB
+deployment. See the [BTCV validation and rollout checklist](btcv-runtime.md).
+Historically the source supported LevelDB and RocksDB to store transaction
 information on disk.  The time taken and DB size is not significantly
 different.  We tried to support LMDB but its history write performance
 was much worse.
@@ -208,16 +210,10 @@ systemctl enable electrumx
 > `.service` file.
 
 
-Installing Python 3.6 under Ubuntu
-----------------------------------
-
-Many Ubuntu distributions have an incompatible Python version baked
-in.  Because of this, it is easier to install Python 3.6.  See
-`contrib/python3.6/python-3.6.sh`.
-
-
 Installing on Raspberry Pi 3
 ----------------------------
+
+The following are historical instructions, not a qualified BTCV target.
 
 To install on the Raspberry Pi 3 you will need to update to the
 ``stretch`` distribution.  See the full procedure in

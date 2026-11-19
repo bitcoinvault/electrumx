@@ -34,9 +34,11 @@ def main():
     except Exception:
         traceback.print_exc()
         logger.critical('ElectrumX server terminated abnormally')
+        return 1
     else:
         logger.info('ElectrumX server terminated normally')
+        return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
